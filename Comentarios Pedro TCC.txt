@@ -5,3 +5,5 @@ Stream colcoar tripe (não complicar)
 Telinha para aluno codar a lei de controle(SEM ENVIAR NAD PRO ESP APENAS PARA DIDATICO)
 Mudar tela experimento, colocar passo a passo em uma janela com explicação, botão de duvida com exe´plo numerico
 Na tela experimento colocar posição na fila e execução de experimento atual, trocar ordem, colocar grafico primeiro e tabela depois.
+Mudar tela integrantes para cadastro individual
+Mudar mensagens publicadas, elas devem possuir identificação no começo 

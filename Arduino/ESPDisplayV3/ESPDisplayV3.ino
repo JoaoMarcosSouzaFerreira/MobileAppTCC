@@ -1,8 +1,8 @@
 /**
  * @file ESP32_LVGL_Final_Project_Refactored.ino
  * @author Adaptado por Gemini
- * @brief Versão 10.2 - Corrigido estado inicial da bancada e lógica de ícones.
- * @version 10.2
+ * @brief Versão 11.1 - Corrigida assinatura do callback ESP-NOW para compatibilidade.
+ * @version 11.1
  */
 
 // ==========================================================
@@ -12,8 +12,9 @@
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include <WiFi.h>
-#include "esp_eap_client.h" // Biblioteca atualizada para WPA2-Enterprise
-#include <freertos/semphr.h> // Para Mutex
+#include <esp_now.h>
+#include "esp_eap_client.h"
+#include <freertos/semphr.h>
 #include "time.h"
 
 // ==========================================================
@@ -33,6 +34,34 @@
 TFT_eSPI tft = TFT_eSPI();
 SPIClass touchscreenSPI = SPIClass(VSPI);
 XPT2046_Touchscreen touchscreen(XPT2046_CS);
+
+// ==========================================================
+// == CONFIGURAÇÃO ESP-NOW
+// ==========================================================
+// Substitua pelo endereço MAC do ESP da BANCADA
+uint8_t broadcastAddress[] = {0x34, 0xAB, 0x95, 0x9B, 0xE1, 0xEC};
+
+// Estrutura para enviar dados para a bancada
+typedef struct struct_message_sent {
+  char topic_ref[32];
+  char topic_nu[32];
+  char topic_nx[32];
+  char topic_k[32];
+  char topic_ke[32];
+} struct_message_sent;
+
+// Estrutura para receber dados da bancada
+typedef struct struct_message_received {
+  int experiment_id;
+  int bench_status; // 0: Not Ready, 1: Ready, 2: Running
+  float water_level;
+  float reference;
+  int next_experiment_id;
+} struct_message_received;
+
+struct_message_sent dataToSend;
+struct_message_received dataReceived;
+esp_now_peer_info_t peerInfo;
 
 // ==========================================================
 // == CONFIGURAÇÃO LVGL E GERAL
@@ -61,51 +90,20 @@ typedef enum {
 Mqtt_Status_t mqttStatus = MQTT_DISCONNECTED; 
 
 typedef enum {
-    BENCH_READY, BENCH_NOT_READY, BENCH_RUNNING
+    BENCH_NOT_READY, BENCH_READY, BENCH_RUNNING
 } Bench_Status_t;
-Bench_Status_t benchStatus = BENCH_NOT_READY; // CORRIGIDO: Estado inicial correto
+Bench_Status_t benchStatus = BENCH_NOT_READY;
 
 // --- Ponteiros para as Telas ---
-static lv_obj_t *screen_home;
-static lv_obj_t *screen_wifi_config;
-static lv_obj_t *screen_broker_config;
-static lv_obj_t *screen_selection;
-static lv_obj_t *screen_topics_config;
-static lv_obj_t *screen_experiment_tracking;
+static lv_obj_t *screen_home, *screen_wifi_config, *screen_broker_config, *screen_selection, *screen_topics_config, *screen_experiment_tracking;
 
 // --- Ponteiros para Objetos da UI ---
-static lv_obj_t *wifi_list;
-static lv_obj_t *popup_universal;
-static lv_obj_t *popup_title;
-static lv_obj_t *popup_message;
-static lv_obj_t *popup_email_container;
-static lv_obj_t *popup_password_container;
-static lv_obj_t *popup_btn_container;
-static lv_obj_t *wifi_email_ta;
-static lv_obj_t *wifi_password_ta;
-static lv_obj_t *keyboard;
+static lv_obj_t *wifi_list, *popup_universal, *popup_title, *popup_message, *popup_email_container, *popup_password_container, *popup_btn_container;
+static lv_obj_t *wifi_email_ta, *wifi_password_ta, *keyboard, *time_label, *status_bar_bench_status_icon, *status_bar_upload_icon, *status_bar_download_icon;
+static lv_obj_t *broker_ip_ta, *broker_port_ta, *broker_user_ta, *broker_password_ta, *broker_auth_container, *selection_broker_status_label;
+static lv_obj_t *topics_ref_ta, *topics_nu_ta, *topics_nx_ta, *topics_k_ta, *topics_ke_ta;
+static lv_obj_t *exp_water_level_label, *exp_reference_label, *exp_status_label, *exp_current_label, *exp_next_label;
 static lv_timer_t *network_timer;
-static lv_obj_t *time_label;
-static lv_obj_t *status_bar_bench_status_icon;
-static lv_obj_t *status_bar_upload_icon;
-static lv_obj_t *status_bar_download_icon;
-static lv_obj_t *broker_ip_ta;
-static lv_obj_t *broker_port_ta;
-static lv_obj_t *broker_user_ta;
-static lv_obj_t *broker_password_ta;
-static lv_obj_t *broker_auth_container;
-static lv_obj_t *selection_broker_status_label;
-static lv_obj_t *topics_ref_ta;
-static lv_obj_t *topics_nu_ta;
-static lv_obj_t *topics_nx_ta;
-static lv_obj_t *topics_k_ta;
-static lv_obj_t *topics_ke_ta;
-static lv_obj_t *exp_water_level_label;
-static lv_obj_t *exp_reference_label;
-static lv_obj_t *exp_status_label;
-static lv_obj_t *exp_current_label;
-static lv_obj_t *exp_next_label;
-
 
 // --- Variáveis de Dados e Estado ---
 #define MAX_SSID_LENGTH 32
@@ -118,39 +116,24 @@ static lv_obj_t *exp_next_label;
 #define MAX_BROKER_PW_LENGTH 64
 #define MAX_TOPIC_VALUE_LENGTH 32
 
-char ssidName[MAX_SSID_LENGTH];
-char ssidPW[MAX_PASSWORD_LENGTH];
-char email_user[MAX_EMAIL_LENGTH];
+char ssidName[MAX_SSID_LENGTH], ssidPW[MAX_PASSWORD_LENGTH], email_user[MAX_EMAIL_LENGTH];
 bool is_corporate_network = false;
-
-char broker_ip[MAX_BROKER_IP_LENGTH];
-char broker_port[MAX_BROKER_PORT_LENGTH];
+char broker_ip[MAX_BROKER_IP_LENGTH], broker_port[MAX_BROKER_PORT_LENGTH], broker_user[MAX_BROKER_USER_LENGTH], broker_pw[MAX_BROKER_PW_LENGTH];
 bool broker_use_auth = false;
-char broker_user[MAX_BROKER_USER_LENGTH];
-char broker_pw[MAX_BROKER_PW_LENGTH];
-
-char topic_ref_val[MAX_TOPIC_VALUE_LENGTH];
-char topic_nu_val[MAX_TOPIC_VALUE_LENGTH];
-char topic_nx_val[MAX_TOPIC_VALUE_LENGTH];
-char topic_k_val[MAX_TOPIC_VALUE_LENGTH];
-char topic_ke_val[MAX_TOPIC_VALUE_LENGTH];
-
+char topic_ref_val[MAX_TOPIC_VALUE_LENGTH], topic_nu_val[MAX_TOPIC_VALUE_LENGTH], topic_nx_val[MAX_TOPIC_VALUE_LENGTH], topic_k_val[MAX_TOPIC_VALUE_LENGTH], topic_ke_val[MAX_TOPIC_VALUE_LENGTH];
 bool came_from_local_mode = false;
-bool is_sending = false;
-bool is_receiving = false;
+bool is_sending = false, is_receiving = false;
 
-
-// --- Dados da Lista de Wi-Fi (Protegidos por Mutex) ---
 char foundWifiList[MAX_WIFI_NETWORKS][MAX_SSID_LENGTH];
 wifi_auth_mode_t foundWifiAuth[MAX_WIFI_NETWORKS];
-int foundNetworksCount = 0;
-int displayedNetworksCount = 0;
+int foundNetworksCount = 0, displayedNetworksCount = 0;
 SemaphoreHandle_t wifi_data_mutex; 
 wifi_auth_mode_t selected_auth_mode; 
-
 TaskHandle_t ntScanTaskHandler = NULL;
 
 // --- Declaração das Funções ---
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status);
+void OnDataRecv(const esp_now_recv_info *info, const uint8_t *incomingData, int len); // <<< ASSINATURA CORRIGIDA
 void create_home_screen();
 void create_wifi_config_screen();
 void create_broker_config_screen();
@@ -204,7 +187,7 @@ void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data) {
 // ==========================================================
 void setup() {
   Serial.begin(115200);
-  Serial.println("Iniciando Projeto v10.2 - UI Finalizada");
+  Serial.println("Iniciando Projeto v11.1 - UI Finalizada");
 
   wifi_data_mutex = xSemaphoreCreateMutex();
 
@@ -233,6 +216,22 @@ void setup() {
   indev_drv.type = LV_INDEV_TYPE_POINTER;
   indev_drv.read_cb = my_touchpad_read;
   lv_indev_drv_register(&indev_drv);
+  
+  // Configuração Wi-Fi e ESP-NOW
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Erro ao inicializar ESP-NOW");
+    return;
+  }
+  esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;  
+  peerInfo.encrypt = false;
+  if (esp_now_add_peer(&peerInfo) != ESP_OK){
+    Serial.println("Falha ao adicionar par");
+    return;
+  }
 
   create_home_screen();
   create_wifi_config_screen();
@@ -249,6 +248,46 @@ void setup() {
 void loop() {
   lv_timer_handler();
   delay(5);
+}
+
+// ==========================================================
+// == CALLBACKS ESP-NOW
+// ==========================================================
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("\r\nStatus do ultimo envio: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Entregue com Sucesso" : "Falha na Entrega");
+  update_communication_icons(false, is_receiving);
+}
+
+void OnDataRecv(const esp_now_recv_info *info, const uint8_t *incomingData, int len) { // <<< ASSINATURA CORRIGIDA
+  memcpy(&dataReceived, incomingData, sizeof(dataReceived));
+  update_communication_icons(is_sending, true);
+
+  update_bench_status_icon((Bench_Status_t)dataReceived.bench_status);
+  
+  char buffer[32];
+  sprintf(buffer, "%.2f cm", dataReceived.water_level);
+  lv_label_set_text(exp_water_level_label, buffer);
+
+  sprintf(buffer, "%.2f cm", dataReceived.reference);
+  lv_label_set_text(exp_reference_label, buffer);
+  
+  if (dataReceived.experiment_id > 0) {
+    sprintf(buffer, "#%d", dataReceived.experiment_id);
+    lv_label_set_text(exp_current_label, buffer);
+  } else {
+    lv_label_set_text(exp_current_label, "N/A");
+  }
+
+  if (dataReceived.next_experiment_id > 0) {
+    sprintf(buffer, "#%d", dataReceived.next_experiment_id);
+    lv_label_set_text(exp_next_label, buffer);
+  } else {
+    lv_label_set_text(exp_next_label, "N/A");
+  }
+  
+  delay(500); // Para o ícone não piscar rápido demais
+  update_communication_icons(is_sending, false);
 }
 
 // ==========================================================
@@ -900,13 +939,18 @@ void main_event_handler(lv_event_t *e) {
             }
         } else if (strcmp(user_data, "topics_send_btn") == 0) {
             // Coleta dos dados dos Tópicos
-            strncpy(topic_ref_val, lv_textarea_get_text(topics_ref_ta), MAX_TOPIC_VALUE_LENGTH - 1);
-            strncpy(topic_nu_val, lv_textarea_get_text(topics_nu_ta), MAX_TOPIC_VALUE_LENGTH - 1);
-            strncpy(topic_nx_val, lv_textarea_get_text(topics_nx_ta), MAX_TOPIC_VALUE_LENGTH - 1);
-            strncpy(topic_k_val, lv_textarea_get_text(topics_k_ta), MAX_TOPIC_VALUE_LENGTH - 1);
-            strncpy(topic_ke_val, lv_textarea_get_text(topics_ke_ta), MAX_TOPIC_VALUE_LENGTH - 1);
-            Serial.println("Dados dos topicos coletados!");
-            show_message_popup("Sucesso", "Dados dos topicos enviados!", "Ok", NULL);
+            strncpy(dataToSend.topic_ref, lv_textarea_get_text(topics_ref_ta), MAX_TOPIC_VALUE_LENGTH - 1);
+            strncpy(dataToSend.topic_nu, lv_textarea_get_text(topics_nu_ta), MAX_TOPIC_VALUE_LENGTH - 1);
+            strncpy(dataToSend.topic_nx, lv_textarea_get_text(topics_nx_ta), MAX_TOPIC_VALUE_LENGTH - 1);
+            strncpy(dataToSend.topic_k, lv_textarea_get_text(topics_k_ta), MAX_TOPIC_VALUE_LENGTH - 1);
+            strncpy(dataToSend.topic_ke, lv_textarea_get_text(topics_ke_ta), MAX_TOPIC_VALUE_LENGTH - 1);
+            
+            update_communication_icons(true, is_receiving);
+            esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *) &dataToSend, sizeof(dataToSend));
+            if (result != ESP_OK) {
+                show_message_popup("Erro", "Falha ao enviar dados para a bancada.", "Ok", NULL);
+                update_communication_icons(false, is_receiving);
+            }
 
         } else if (strcmp(user_data, "wifi_refresh_btn") == 0) {
             startWifiScan();
